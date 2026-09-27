@@ -1,6 +1,6 @@
 # DirectX 12 mesh viewer
 
-Small Windows viewer for triangle meshes. It loads `.obj`, `.fbx`, `.gltf`, and `.glb` with Assimp, uploads one vertex buffer and one index buffer, and draws them with a directional light. This is not part of the gateway build in the repository root. Configure `meshviewer/` on its own.
+Small Windows viewer for triangle meshes. It loads `.obj`, `.fbx`, `.gltf`, and `.glb` with Assimp, uploads one vertex buffer and one index buffer, and draws them with a directional light. Configure this repository from its root.
 
 The DirectX 12 window cannot be compiled on a Linux host. On Windows it needs Visual Studio 2022, the Windows 10/11 SDK, and CMake.
 
@@ -24,29 +24,29 @@ Install the **Desktop development with C++** workload and a current Windows SDK.
 
 ```powershell
 $env:VCPKG_ROOT = "G:\GitHub\vcpkg"
-cmake -S meshviewer -B meshviewer\build -G "Visual Studio 17 2022" -A x64 `
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
-cmake --build meshviewer\build --config Release
-.\meshviewer\build\Release\meshviewer.exe
+cmake --build build --config Release
+.\build\Release\meshviewer.exe
 ```
 
-The first configure builds Assimp from `meshviewer/vcpkg.json`. That takes a while. vcpkg copies `assimp` DLLs next to the executable.
+The first configure builds Assimp from `vcpkg.json`. That takes a while. vcpkg copies `assimp` DLLs next to the executable.
 
-The Release executable is `meshviewer\build\Release\meshviewer.exe`. Shaders and `assets\sample.obj` are copied beside it.
+The Release executable is `build\Release\meshviewer.exe`. Shaders and `assets\sample.obj` are copied beside it.
 
 ## Open a mesh
 
 No path loads the sample sphere:
 
 ```powershell
-.\meshviewer\build\Release\meshviewer.exe
+.\build\Release\meshviewer.exe
 ```
 
 Or pass a file. Relative paths are resolved from the current directory:
 
 ```powershell
-.\meshviewer\build\Release\meshviewer.exe C:\models\crate.fbx
-.\meshviewer\build\Release\meshviewer.exe .\scene.gltf
+.\build\Release\meshviewer.exe C:\models\crate.fbx
+.\build\Release\meshviewer.exe .\scene.gltf
 ```
 
 You can also drag a mesh file onto the window. `-h` shows the same usage text.
@@ -56,9 +56,9 @@ You can also drag a mesh file onto the window. `-h` shows the same usage text.
 `meshviewer_loader_test` checks Assimp import, generated normals, outward winding, the sample mesh, and a node transform. It does not create a DirectX device. On Windows it builds with the viewer. On Linux, with Assimp installed (`libassimp-dev` or vcpkg):
 
 ```bash
-cmake -S meshviewer -B meshviewer/build -DCMAKE_CXX_COMPILER=g++
-cmake --build meshviewer/build
-ctest --test-dir meshviewer/build --output-on-failure
+cmake -S . -B build -DCMAKE_CXX_COMPILER=g++
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 Pass `-DCMAKE_CXX_COMPILER=g++` when the default `c++` is Clang and the link fails looking for `-lstdc++`.
