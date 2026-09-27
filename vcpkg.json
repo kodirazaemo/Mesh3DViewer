@@ -1,0 +1,8 @@
+{
+  "name": "meshviewer",
+  "version-string": "1.0.0",
+  "description": "Windows DirectX 12 mesh viewer (Assimp import, orbit camera).",
+  "dependencies": [
+    "assimp"
+  ]
+}
