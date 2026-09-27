@@ -34,6 +34,12 @@ The first configure builds Assimp from `vcpkg.json`. That takes a while. vcpkg c
 
 The Release executable is `build\Release\meshviewer.exe`. Shaders and `assets\sample.obj` are copied beside it.
 
+## Visual Studio 2022
+
+Open `Mesh3DViewer.sln` in this directory. The project uses the v143 toolset and x64. It installs Assimp from `vcpkg.json` when `VCPKG_ROOT` is set. On this machine that checkout is `G:\GitHub\vcpkg`.
+
+Build **Release | x64**. The executable is `bin\x64\Release\meshviewer.exe`. The build copies `shaders\mesh.hlsl` and `assets\sample.obj` into `shaders\` and `assets\` next to that executable.
+
 ## Open a mesh
 
 No path loads the sample sphere:

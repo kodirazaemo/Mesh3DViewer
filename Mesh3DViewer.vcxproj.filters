@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{A1B2C3D4-E5F6-4789-A012-3456789ABCDE}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="shaders">
+      <UniqueIdentifier>{B2C3D4E5-F6A7-4890-B123-456789ABCDEF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="assets">
+      <UniqueIdentifier>{C3D4E5F6-A7B8-4901-C234-56789ABCDEF0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party">
+      <UniqueIdentifier>{D4E5F6A7-B8C9-4012-D345-6789ABCDEF01}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\camera.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mesh_loader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\renderer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\camera.hpp">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\dx_util.hpp">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mesh_loader.hpp">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\renderer.hpp">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="third_party\d3dx12.h">
+      <Filter>third_party</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\mesh.hlsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="assets\sample.obj">
+      <Filter>assets</Filter>
+    </None>
+  </ItemGroup>
+</Project>
