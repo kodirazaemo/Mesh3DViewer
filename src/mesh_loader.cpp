@@ -88,6 +88,26 @@ void AppendMesh(const aiMesh* source, const aiMatrix4x4& transform, CpuMesh& mes
     vertex.normal[0] = normal.x;
     vertex.normal[1] = normal.y;
     vertex.normal[2] = normal.z;
+    if (source->HasTextureCoords(0)) {
+      const aiVector3D& uv = source->mTextureCoords[0][index];
+      vertex.uv[0] = uv.x;
+      vertex.uv[1] = uv.y;
+    } else {
+      vertex.uv[0] = 0.0f;
+      vertex.uv[1] = 0.0f;
+    }
+    if (source->HasVertexColors(0)) {
+      const aiColor4D& color = source->mColors[0][index];
+      vertex.color[0] = color.r;
+      vertex.color[1] = color.g;
+      vertex.color[2] = color.b;
+      vertex.color[3] = color.a;
+    } else {
+      vertex.color[0] = 1.0f;
+      vertex.color[1] = 1.0f;
+      vertex.color[2] = 1.0f;
+      vertex.color[3] = 1.0f;
+    }
     mesh.vertices.push_back(vertex);
     ExpandBounds(mesh, position.x, position.y, position.z);
   }

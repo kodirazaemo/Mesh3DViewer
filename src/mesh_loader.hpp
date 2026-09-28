@@ -10,9 +10,14 @@ namespace meshviewer {
 struct CpuVertex {
   float position[3];
   float normal[3];
+  float uv[2];
+  float color[4];
 };
 
-static_assert(sizeof(CpuVertex) == 24, "GPU input layout packs position and normal tightly");
+static_assert(sizeof(CpuVertex) == 48, "GPU input layout packs position, normal, uv, and color tightly");
+static_assert(offsetof(CpuVertex, normal) == 12, "normal follows position");
+static_assert(offsetof(CpuVertex, uv) == 24, "uv follows normal");
+static_assert(offsetof(CpuVertex, color) == 32, "color follows uv");
 
 struct CpuMesh {
   std::vector<CpuVertex> vertices;

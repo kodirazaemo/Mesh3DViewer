@@ -276,8 +276,14 @@ void Renderer::CreatePipeline(const std::filesystem::path& shaderPath) {
   const ComPtr<ID3DBlob> pixelShader = CompileShader(shaderPath, "PSMain", "ps_5_0");
 
   D3D12_INPUT_ELEMENT_DESC layout[] = {
-      {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-      {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+      {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, position)),
+       D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+      {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, normal)),
+       D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+      {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, uv)),
+       D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, color)),
+       D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
   };
 
   D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
@@ -288,7 +294,7 @@ void Renderer::CreatePipeline(const std::filesystem::path& shaderPath) {
   pso.SampleMask = UINT_MAX;
   pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
   pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-  pso.InputLayout = {layout, 2};
+  pso.InputLayout = {layout, 4};
   pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pso.NumRenderTargets = 1;
   pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;

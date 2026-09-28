@@ -22,6 +22,12 @@ bool nearly(float value, float expected, float epsilon) {
   return std::fabs(value - expected) <= epsilon;
 }
 
+bool defaultAttributes(const meshviewer::CpuVertex& vertex) {
+  return nearly(vertex.uv[0], 0.0f, 1.0e-6f) && nearly(vertex.uv[1], 0.0f, 1.0e-6f) &&
+         nearly(vertex.color[0], 1.0f, 1.0e-6f) && nearly(vertex.color[1], 1.0f, 1.0e-6f) &&
+         nearly(vertex.color[2], 1.0f, 1.0e-6f) && nearly(vertex.color[3], 1.0f, 1.0e-6f);
+}
+
 void expectValid(const meshviewer::CpuMesh& mesh, const char* what) {
   expect(!mesh.vertices.empty(), what);
   expect(mesh.indices.size() % 3 == 0, "index count is a multiple of 3");
@@ -106,6 +112,48 @@ f 4 7 3
     expect(triangle.vertices.size() == 3, "triangle keeps 3 vertices");
     expect(triangle.indices.size() == 3, "triangle keeps 1 face");
     expect(triangle.vertices[0].normal[2] > 0.9f, "generated triangle normal faces +Z");
+    bool triangleDefaults = true;
+    for (const meshviewer::CpuVertex& vertex : triangle.vertices) {
+      if (!defaultAttributes(vertex)) {
+        triangleDefaults = false;
+        break;
+      }
+    }
+    expect(triangleDefaults, "triangle without uv or color stores (0, 0) and white");
+
+    constexpr std::string_view kColored = R"ply(ply
+format ascii 1.0
+element vertex 3
+property float x
+property float y
+property float z
+property float s
+property float t
+property float red
+property float green
+property float blue
+property float alpha
+element face 1
+property list uchar int vertex_indices
+end_header
+0 0 0 0.10 0.20 0.25 0.50 0.75 0.125
+1 0 0 0.30 0.40 0.25 0.50 0.75 0.125
+0 1 0 0.50 0.60 0.25 0.50 0.75 0.125
+3 0 1 2
+)ply";
+    const meshviewer::CpuMesh colored = meshviewer::LoadMeshFromMemory(kColored.data(), kColored.size(), "ply");
+    expectValid(colored, "colored ply has vertices");
+    expect(colored.vertices.size() == 3, "colored ply keeps 3 vertices");
+    const float expectedUv[3][2] = {{0.10f, 0.20f}, {0.30f, 0.40f}, {0.50f, 0.60f}};
+    bool coloredAttributes = colored.vertices.size() == 3;
+    for (std::size_t index = 0; index < colored.vertices.size() && index < 3; ++index) {
+      const meshviewer::CpuVertex& vertex = colored.vertices[index];
+      coloredAttributes = coloredAttributes && nearly(vertex.uv[0], expectedUv[index][0], 1.0e-5f) &&
+                          nearly(vertex.uv[1], expectedUv[index][1], 1.0e-5f) &&
+                          nearly(vertex.color[0], 0.25f, 1.0e-5f) && nearly(vertex.color[1], 0.50f, 1.0e-5f) &&
+                          nearly(vertex.color[2], 0.75f, 1.0e-5f) && nearly(vertex.color[3], 0.125f, 1.0e-5f);
+    }
+    expect(coloredAttributes, "ply uv channel 0 and vertex color including alpha are stored");
 
     const meshviewer::CpuMesh cube = meshviewer::LoadMeshFromMemory(kCube.data(), kCube.size(), "obj");
     expectValid(cube, "cube has vertices");
