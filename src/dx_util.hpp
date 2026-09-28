@@ -13,19 +13,22 @@
 #include <stdexcept>
 #include <string>
 
-namespace meshviewer {
+namespace meshviewer
+{
 
-inline std::string HResultText(HRESULT hr, const char* call) {
-  char buffer[160];
-  std::snprintf(buffer, sizeof(buffer), "%s failed (HRESULT 0x%08X)", call,
-                static_cast<unsigned>(hr));
-  return buffer;
+inline std::string HResultText(HRESULT hr, const char *call)
+{
+    char buffer[160];
+    std::snprintf(buffer, sizeof(buffer), "%s failed (HRESULT 0x%08X)", call, static_cast<unsigned>(hr));
+    return buffer;
 }
 
-inline void ThrowIfFailed(HRESULT hr, const char* call) {
-  if (FAILED(hr)) {
-    throw std::runtime_error(HResultText(hr, call));
-  }
+inline void ThrowIfFailed(HRESULT hr, const char *call)
+{
+    if (FAILED(hr))
+    {
+        throw std::runtime_error(HResultText(hr, call));
+    }
 }
 
-}  // namespace meshviewer
+} // namespace meshviewer

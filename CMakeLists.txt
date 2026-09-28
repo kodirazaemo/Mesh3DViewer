@@ -39,6 +39,7 @@ if(WIN32)
     src/mesh_loader.cpp
     src/renderer.cpp
   )
+  target_compile_features(meshviewer PRIVATE cxx_std_20)
   target_include_directories(meshviewer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_include_directories(meshviewer SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
   target_link_libraries(meshviewer PRIVATE

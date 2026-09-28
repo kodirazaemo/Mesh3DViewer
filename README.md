@@ -18,6 +18,20 @@ Left drag orbits the mesh. The mouse wheel zooms. Esc closes the window. The mes
 
 `third_party/d3dx12.h` is Microsoft's D3DX12 helper header (MIT), the single-file form published with the [DirectX VS templates](https://github.com/walbourn/directx-vs-templates/blob/main/d3d12game_win32_dr/d3dx12.h). DirectXMath comes from the Windows SDK. Assimp comes from vcpkg.
 
+## Architecture
+
+`main.cpp` opens a Win32 window. The client area starts at 1280 by 720, adjusted for the system DPI. The window procedure turns left-drag into an orbit, the mouse wheel into a zoom, Esc into close, and a dropped file into a mesh reload. Resize rebuilds the swap-chain buffers and updates the camera aspect.
+
+`Renderer` creates an `IDXGIFactory4`, skips software adapters, and creates an `ID3D12Device` at feature level 11.0. If no hardware adapter works, it uses the WARP software adapter. It then creates one direct command queue, one command allocator, and one graphics command list, plus a fence so the CPU can wait for the GPU. The swap chain is a two-buffer flip-discard chain (`DXGI_FORMAT_R8G8B8A8_UNORM`) on that window. A `D32_FLOAT` depth buffer matches the client size. Debug builds turn on the Direct3D debug layer when it is available.
+
+A mesh file goes through Assimp. The import flags triangulate faces, join identical vertices, generate normals, improve cache locality, and sort by primitive type. The loader walks the node tree and bakes each node matrix into positions. Normals use the inverse-transpose of that matrix. Meshes that are not triangles are skipped, and faces that are not three indices are skipped. UV channel 0 is stored when the file has it, otherwise `(0, 0)`. Vertex color channel 0 is stored with alpha when the file has it, otherwise `(1, 1, 1, 1)`. Each CPU vertex is position, normal, UV, and color. The mesh is then centered and scaled so its longest side is 2 units. `UploadMesh` copies those arrays into an upload heap and then into default-heap vertex and index buffers.
+
+Each frame the orbit camera builds a right-handed view aimed at the origin and a 45-degree perspective projection. The world matrix is the fit translation and scale. Those, with a fixed light direction, are written into one constant buffer at register `b0`. The command list clears the color and depth, sets the viewport, root signature, pipeline, and buffers, draws the indexed triangles, and presents.
+
+The vertex shader transforms position by the model-view-projection matrix and the normal by the world matrix. It passes UV as `TEXCOORD0` and vertex color as `COLOR0`. The pixel shader shades with a directional light: a gray base color times `0.2 + 0.8 * NdotL`, multiplied by the vertex color, then gamma-encoded for the UNORM swap chain. White vertex color leaves that shading unchanged. UV is carried through the shader so the compiler keeps it, and it does not tint the pixel. There is no texture lookup, skinning, or animation.
+
+`Mesh3DViewer.sln` and CMake both compile `src/main.cpp`, `src/camera.cpp`, `src/mesh_loader.cpp`, and `src/renderer.cpp`. CMake also builds the loader test. Both use C++20.
+
 ## Build on Windows
 
 Install the **Desktop development with C++** workload and a current Windows SDK. vcpkg on this machine is `G:\GitHub\vcpkg`. From the repository root:
