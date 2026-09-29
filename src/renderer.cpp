@@ -5,12 +5,19 @@
 #include "d3dx12.h"
 
 #include <d3dcompiler.h>
+#include <shlwapi.h>
+#include <wincodec.h>
 
 #include <cstddef>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "ole32.lib")
 
 namespace meshviewer
 {
@@ -63,6 +70,98 @@ ComPtr<ID3DBlob> CompileShader(const std::filesystem::path &path, const char *en
         throw std::runtime_error(message);
     }
     return shader;
+}
+
+struct DecodedImage
+{
+    UINT width = 0;
+    UINT height = 0;
+    std::vector<std::uint8_t> rgba;
+};
+
+void CopyWicFrame(IWICImagingFactory *factory, IWICBitmapSource *source, DecodedImage &image)
+{
+    ComPtr<IWICFormatConverter> converter;
+    ThrowIfFailed(factory->CreateFormatConverter(&converter), "CreateFormatConverter");
+    ThrowIfFailed(converter->Initialize(source, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeCustom),
+                  "IWICFormatConverter::Initialize");
+    UINT width = 0;
+    UINT height = 0;
+    ThrowIfFailed(converter->GetSize(&width, &height), "GetSize");
+    if (width == 0 || height == 0 || width > 16384 || height > 16384)
+    {
+        throw std::runtime_error("texture dimensions are out of range");
+    }
+    image.width = width;
+    image.height = height;
+    image.rgba.resize(static_cast<std::size_t>(width) * height * 4);
+    const UINT stride = width * 4;
+    ThrowIfFailed(converter->CopyPixels(nullptr, stride, static_cast<UINT>(image.rgba.size()), image.rgba.data()),
+                  "CopyPixels");
+}
+
+DecodedImage DecodeWithWic(const std::filesystem::path &file, const std::vector<std::uint8_t> &encoded)
+{
+    ComPtr<IWICImagingFactory> factory;
+    ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)),
+                  "CoCreateInstance(WIC)");
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IStream> stream;
+    if (!file.empty())
+    {
+        ThrowIfFailed(factory->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ,
+                                                         WICDecodeMetadataCacheOnDemand, &decoder),
+                      "CreateDecoderFromFilename");
+    }
+    else
+    {
+        if (encoded.size() > std::numeric_limits<UINT>::max())
+        {
+            throw std::runtime_error("embedded texture is too large");
+        }
+        stream.Attach(SHCreateMemStream(encoded.data(), static_cast<UINT>(encoded.size())));
+        if (!stream)
+        {
+            throw std::runtime_error("SHCreateMemStream failed");
+        }
+        ThrowIfFailed(factory->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &decoder),
+                      "CreateDecoderFromStream");
+    }
+
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ThrowIfFailed(decoder->GetFrame(0, &frame), "GetFrame");
+    DecodedImage image;
+    CopyWicFrame(factory.Get(), frame.Get(), image);
+    return image;
+}
+
+DecodedImage DecodeMeshTexture(const CpuMesh &mesh)
+{
+    if (!mesh.textureRgba.empty())
+    {
+        const std::size_t expected = static_cast<std::size_t>(mesh.textureWidth) * mesh.textureHeight * 4;
+        if (mesh.textureWidth == 0 || mesh.textureHeight == 0 || mesh.textureRgba.size() != expected)
+        {
+            throw std::runtime_error("embedded texture pixels do not match its dimensions");
+        }
+        DecodedImage image;
+        image.width = mesh.textureWidth;
+        image.height = mesh.textureHeight;
+        image.rgba = mesh.textureRgba;
+        return image;
+    }
+    if (!mesh.textureFile.empty() || !mesh.textureEncoded.empty())
+    {
+        return DecodeWithWic(mesh.textureFile, mesh.textureEncoded);
+    }
+
+    DecodedImage white;
+    white.width = 1;
+    white.height = 1;
+    white.rgba = {255, 255, 255, 255};
+    return white;
 }
 
 ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device *device, D3D12_HEAP_TYPE heapType, UINT64 size,
@@ -135,6 +234,11 @@ Renderer::~Renderer()
         CloseHandle(fenceEvent_);
         fenceEvent_ = nullptr;
     }
+    if (comInitialized_)
+    {
+        CoUninitialize();
+        comInitialized_ = false;
+    }
 }
 
 void Renderer::Initialize(HWND hwnd, std::uint32_t width, std::uint32_t height, const std::filesystem::path &shaderPath)
@@ -145,6 +249,15 @@ void Renderer::Initialize(HWND hwnd, std::uint32_t width, std::uint32_t height, 
     }
     width_ = width;
     height_ = height;
+
+    if (!comInitialized_)
+    {
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (SUCCEEDED(comHr))
+        {
+            comInitialized_ = true;
+        }
+    }
 
     // Factory, adapter enumeration, and the device come first. IDXGIFactory4 is the
     // IDXGIFactory used to enumerate adapters and create the swap chain.
@@ -234,6 +347,12 @@ void Renderer::CreateDescriptorHeaps()
     dsvDesc.NumDescriptors = 1;
     dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     ThrowIfFailed(device_->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&dsvHeap_)), "CreateDescriptorHeap(DSV)");
+
+    D3D12_DESCRIPTOR_HEAP_DESC srvDesc{};
+    srvDesc.NumDescriptors = 1;
+    srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&srvHeap_)), "CreateDescriptorHeap(SRV)");
 }
 
 void Renderer::CreateSizeDependentResources()
@@ -284,11 +403,30 @@ void Renderer::UpdateViewport()
 
 void Renderer::CreateRootSignature()
 {
-    CD3DX12_ROOT_PARAMETER parameter;
-    parameter.InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+    CD3DX12_DESCRIPTOR_RANGE range;
+    range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER parameters[2];
+    parameters[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+    parameters[1].InitAsDescriptorTable(1, &range, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MipLODBias = 0.0f;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    sampler.MinLOD = 0.0f;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.RegisterSpace = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC desc;
-    desc.Init(1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    desc.Init(2, parameters, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serialized;
     ComPtr<ID3DBlob> error;
@@ -328,7 +466,17 @@ void Renderer::CreatePipeline(const std::filesystem::path &shaderPath)
     pso.pRootSignature = rootSignature_.Get();
     pso.VS = {vertexShader->GetBufferPointer(), vertexShader->GetBufferSize()};
     pso.PS = {pixelShader->GetBufferPointer(), pixelShader->GetBufferSize()};
-    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    CD3DX12_BLEND_DESC blend(D3D12_DEFAULT);
+    D3D12_RENDER_TARGET_BLEND_DESC &target = blend.RenderTarget[0];
+    target.BlendEnable = TRUE;
+    target.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    target.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    target.BlendOp = D3D12_BLEND_OP_ADD;
+    target.SrcBlendAlpha = D3D12_BLEND_SRC_ALPHA;
+    target.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.BlendState = blend;
     pso.SampleMask = UINT_MAX;
     pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
@@ -409,6 +557,7 @@ void Renderer::UploadMesh(const CpuMesh &mesh)
                                              D3D12_RESOURCE_STATE_INDEX_BUFFER),
     };
     commandList_->ResourceBarrier(2, barriers);
+    UploadTexture(mesh);
     ThrowIfFailed(commandList_->Close(), "Close");
 
     ID3D12CommandList *lists[] = {commandList_.Get()};
@@ -428,6 +577,70 @@ void Renderer::UploadMesh(const CpuMesh &mesh)
     indexView_.SizeInBytes = static_cast<UINT>(indexBytes);
     indexView_.Format = DXGI_FORMAT_R32_UINT;
     indexCount_ = static_cast<UINT>(mesh.indices.size());
+}
+
+void Renderer::UploadTexture(const CpuMesh &mesh)
+{
+    if (!srvHeap_)
+    {
+        throw std::runtime_error("shader resource heap is not initialized");
+    }
+
+    const DecodedImage image = DecodeMeshTexture(mesh);
+    const UINT rowPitch =
+        (image.width * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    const UINT64 uploadBytes = static_cast<UINT64>(rowPitch) * image.height;
+
+    const CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    const auto textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, image.width, image.height, 1, 1);
+    ComPtr<ID3D12Resource> texture;
+    ThrowIfFailed(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDesc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture)),
+                  "CreateCommittedResource(texture)");
+    ComPtr<ID3D12Resource> upload =
+        CreateBuffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, uploadBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+    void *mapped = nullptr;
+    ThrowIfFailed(upload->Map(0, nullptr, &mapped), "Map(texture)");
+    auto *destination = static_cast<std::uint8_t *>(mapped);
+    for (UINT row = 0; row < image.height; ++row)
+    {
+        std::memcpy(destination + static_cast<std::size_t>(row) * rowPitch,
+                    image.rgba.data() + static_cast<std::size_t>(row) * image.width * 4,
+                    static_cast<std::size_t>(image.width) * 4);
+    }
+    upload->Unmap(0, nullptr);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    footprint.Footprint.Width = image.width;
+    footprint.Footprint.Height = image.height;
+    footprint.Footprint.Depth = 1;
+    footprint.Footprint.RowPitch = rowPitch;
+
+    D3D12_TEXTURE_COPY_LOCATION destinationLocation{};
+    destinationLocation.pResource = texture.Get();
+    destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION sourceLocation{};
+    sourceLocation.pResource = upload.Get();
+    sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    sourceLocation.PlacedFootprint = footprint;
+    commandList_->CopyTextureRegion(&destinationLocation, 0, 0, 0, &sourceLocation, nullptr);
+
+    const auto toShader = CD3DX12_RESOURCE_BARRIER::Transition(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    commandList_->ResourceBarrier(1, &toShader);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(texture.Get(), &srv, srvHeap_->GetCPUDescriptorHandleForHeapStart());
+
+    texture_ = std::move(texture);
+    texture_->SetName(L"BaseColorTexture");
+    textureUpload_ = std::move(upload);
 }
 
 void Renderer::Render(const DirectX::XMMATRIX &world, const DirectX::XMMATRIX &view,
@@ -467,6 +680,9 @@ void Renderer::Render(const DirectX::XMMATRIX &world, const DirectX::XMMATRIX &v
     commandList_->RSSetScissorRects(1, &scissor_);
     commandList_->SetGraphicsRootSignature(rootSignature_.Get());
     commandList_->SetPipelineState(pipeline_.Get());
+    ID3D12DescriptorHeap *heaps[] = {srvHeap_.Get()};
+    commandList_->SetDescriptorHeaps(1, heaps);
+    commandList_->SetGraphicsRootDescriptorTable(1, srvHeap_->GetGPUDescriptorHandleForHeapStart());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
 

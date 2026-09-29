@@ -16,6 +16,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace meshviewer
 {
@@ -29,6 +30,100 @@ std::string Utf8Path(const std::filesystem::path &path)
 {
     const auto utf8 = path.u8string();
     return std::string(reinterpret_cast<const char *>(utf8.data()), utf8.size());
+}
+
+std::filesystem::path PathFromUtf8(std::string_view text)
+{
+    const std::u8string utf8(reinterpret_cast<const char8_t *>(text.data()), text.size());
+    return std::filesystem::path(utf8);
+}
+
+bool MaterialTexturePath(const aiMaterial *material, aiTextureType type, aiString &path)
+{
+    return material != nullptr && aiGetMaterialTexture(material, type, 0, &path) == AI_SUCCESS && path.length > 0;
+}
+
+bool FindBaseColorTexture(const aiMaterial *material, aiString &path)
+{
+    return MaterialTexturePath(material, aiTextureType_BASE_COLOR, path) ||
+           MaterialTexturePath(material, aiTextureType_DIFFUSE, path);
+}
+
+void StoreEmbeddedTexture(const aiTexture *embedded, CpuMesh &mesh)
+{
+    if (embedded->pcData == nullptr || embedded->mWidth == 0)
+    {
+        throw std::runtime_error("embedded texture is empty");
+    }
+    if (embedded->mHeight == 0)
+    {
+        const auto *bytes = reinterpret_cast<const std::uint8_t *>(embedded->pcData);
+        mesh.textureEncoded.assign(bytes, bytes + embedded->mWidth);
+        return;
+    }
+
+    const std::uint32_t width = embedded->mWidth;
+    const std::uint32_t height = embedded->mHeight;
+    mesh.textureWidth = width;
+    mesh.textureHeight = height;
+    mesh.textureRgba.resize(static_cast<std::size_t>(width) * height * 4);
+    for (std::uint32_t index = 0; index < width * height; ++index)
+    {
+        const aiTexel &texel = embedded->pcData[index];
+        std::uint8_t *pixel = mesh.textureRgba.data() + static_cast<std::size_t>(index) * 4;
+        pixel[0] = texel.r;
+        pixel[1] = texel.g;
+        pixel[2] = texel.b;
+        pixel[3] = texel.a;
+    }
+}
+
+std::filesystem::path FindTextureFile(const std::filesystem::path &meshDirectory, const aiString &texturePath)
+{
+    const std::filesystem::path asGiven = PathFromUtf8(std::string_view(texturePath.data, texturePath.length));
+    if (asGiven.is_absolute() && std::filesystem::is_regular_file(asGiven))
+    {
+        return asGiven;
+    }
+    if (!meshDirectory.empty())
+    {
+        const std::filesystem::path besideMesh = meshDirectory / asGiven;
+        if (std::filesystem::is_regular_file(besideMesh))
+        {
+            return besideMesh;
+        }
+        const std::filesystem::path byName = meshDirectory / asGiven.filename();
+        if (std::filesystem::is_regular_file(byName))
+        {
+            return byName;
+        }
+    }
+    if (std::filesystem::is_regular_file(asGiven))
+    {
+        return asGiven;
+    }
+    throw std::runtime_error(std::string("texture file not found: ") + texturePath.C_Str());
+}
+
+void AttachBaseColorTexture(const aiScene *scene, const std::filesystem::path &meshDirectory, CpuMesh &mesh)
+{
+    for (unsigned int index = 0; index < scene->mNumMaterials; ++index)
+    {
+        aiString texturePath;
+        if (!FindBaseColorTexture(scene->mMaterials[index], texturePath))
+        {
+            continue;
+        }
+
+        const char *name = texturePath.C_Str();
+        if (const aiTexture *embedded = scene->GetEmbeddedTexture(name))
+        {
+            StoreEmbeddedTexture(embedded, mesh);
+            return;
+        }
+        mesh.textureFile = FindTextureFile(meshDirectory, texturePath);
+        return;
+    }
 }
 
 void ExpandBounds(CpuMesh &mesh, float x, float y, float z)
@@ -169,7 +264,7 @@ void AppendNode(const aiScene *scene, const aiNode *node, const aiMatrix4x4 &par
     }
 }
 
-CpuMesh FromScene(const aiScene *scene, Assimp::Importer &importer)
+CpuMesh FromScene(const aiScene *scene, Assimp::Importer &importer, const std::filesystem::path &meshDirectory)
 {
     if (!scene || !scene->mRootNode)
     {
@@ -188,6 +283,7 @@ CpuMesh FromScene(const aiScene *scene, Assimp::Importer &importer)
     {
         throw std::runtime_error("mesh file did not contain any triangles");
     }
+    AttachBaseColorTexture(scene, meshDirectory, mesh);
     return mesh;
 }
 
@@ -208,7 +304,7 @@ CpuMesh LoadMesh(const std::filesystem::path &path)
     Assimp::Importer importer;
     const std::string utf8 = Utf8Path(path);
     const aiScene *scene = importer.ReadFile(utf8, kPostProcess);
-    return FromScene(scene, importer);
+    return FromScene(scene, importer, path.parent_path());
 }
 
 CpuMesh LoadMeshFromMemory(const void *data, std::size_t size, const char *hint)
@@ -219,7 +315,7 @@ CpuMesh LoadMeshFromMemory(const void *data, std::size_t size, const char *hint)
     }
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFileFromMemory(data, size, kPostProcess, hint);
-    return FromScene(scene, importer);
+    return FromScene(scene, importer, {});
 }
 
 MeshFit FitMesh(const CpuMesh &mesh)

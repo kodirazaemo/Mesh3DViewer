@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string_view>
 
@@ -137,6 +139,30 @@ f 4 7 3
             }
         }
         expect(triangleDefaults, "triangle without uv or color stores (0, 0) and white");
+        expect(triangle.textureFile.empty() && triangle.textureEncoded.empty() && triangle.textureRgba.empty(),
+               "triangle without a material texture has no image");
+
+        const auto textureDir = std::filesystem::temp_directory_path() / "meshviewer-texture-test";
+        std::filesystem::remove_all(textureDir);
+        std::filesystem::create_directory(textureDir);
+        const unsigned char png[] = {
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+            0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x50, 0x0F, 0x00, 0x04, 0x85, 0x01, 0x80,
+            0x84, 0xA9, 0x8C, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82};
+        {
+            std::ofstream image(textureDir / "tiny.png", std::ios::binary);
+            image.write(reinterpret_cast<const char *>(png), sizeof(png));
+            std::ofstream material(textureDir / "mat.mtl");
+            material << "newmtl mat\nmap_Kd tiny.png\n";
+            std::ofstream object(textureDir / "textured.obj");
+            object << "mtllib mat.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nusemtl mat\nf 1/1 2/2 3/3\n";
+        }
+        const meshviewer::CpuMesh textured = meshviewer::LoadMesh(textureDir / "textured.obj");
+        expectValid(textured, "textured obj has vertices");
+        expect(textured.textureFile.filename() == "tiny.png", "obj map_Kd resolves next to the mesh");
+        expect(std::filesystem::is_regular_file(textured.textureFile), "resolved texture file exists");
+        std::filesystem::remove_all(textureDir);
 
         constexpr std::string_view kColored = R"ply(ply
 format ascii 1.0

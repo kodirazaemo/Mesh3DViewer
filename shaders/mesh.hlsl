@@ -5,6 +5,9 @@ cbuffer FrameConstants : register(b0)
     float4 lightDirection; // xyz: world-space direction toward the light
 };
 
+Texture2D baseColorTexture : register(t0);
+SamplerState baseColorSampler : register(s0);
+
 struct VsInput
 {
     float3 position : POSITION;
@@ -39,12 +42,13 @@ float4 PSMain(VsOutput input) : SV_TARGET
     float diffuse = saturate(dot(normal, light));
     float3 baseColor = float3(0.72, 0.75, 0.80);
     float3 color = baseColor * (0.20 + 0.80 * diffuse);
+    // A missing material texture is a 1x1 white image, which leaves this shading unchanged.
+    const float4 sampled = baseColorTexture.Sample(baseColorSampler, input.uv);
+    color *= sampled.rgb;
     // Vertex color scales the lit color. White, the missing-channel default, leaves it unchanged.
     color *= input.color.rgb;
     // The swap chain is UNORM, so encode a light gamma for a readable image.
     color = pow(max(color, 0.0), 1.0 / 2.2);
-    // Keep TEXCOORD0 live. clip() is a side effect the compiler cannot drop, and
-    // ordinary UVs (including the missing-channel default of 0) stay well above the threshold.
-    clip(min(input.uv.x, input.uv.y) + 1.0e10);
-    return float4(color, input.color.a);
+    // Straight alpha: texture alpha times vertex-color alpha. Opaque (1) replaces the target.
+    return float4(color, sampled.a * input.color.a);
 }

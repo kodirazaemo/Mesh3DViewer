@@ -27,6 +27,14 @@ struct CpuMesh
     std::vector<std::uint32_t> indices;
     float boundsMin[3]{};
     float boundsMax[3]{};
+    // Uncompressed embedded texels, tightly packed RGBA8. Empty when the texture is a file or a compressed blob.
+    std::uint32_t textureWidth = 0;
+    std::uint32_t textureHeight = 0;
+    std::vector<std::uint8_t> textureRgba;
+    // Compressed embedded image (PNG, JPEG, and the other containers Assimp stores). Decoded with WIC on Windows.
+    std::vector<std::uint8_t> textureEncoded;
+    // External image next to the mesh. Empty when the material has no file texture.
+    std::filesystem::path textureFile;
 };
 
 // Places the mesh at the origin and scales its longest axis to 2 units.

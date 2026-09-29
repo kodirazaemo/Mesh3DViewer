@@ -41,6 +41,7 @@ class Renderer
     void CreateRootSignature();
     void CreatePipeline(const std::filesystem::path &shaderPath);
     void CreateConstantBuffer();
+    void UploadTexture(const CpuMesh &mesh);
     void Signal();
 
     static constexpr UINT kFrameCount = 2;
@@ -54,6 +55,7 @@ class Renderer
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> renderTargets_[kFrameCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> depth_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
@@ -61,10 +63,13 @@ class Renderer
     Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> texture_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> textureUpload_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
 
     std::uint8_t *constantMapped_ = nullptr;
     HANDLE fenceEvent_ = nullptr;
+    bool comInitialized_ = false;
     UINT64 fenceValue_ = 0;
     UINT rtvDescriptorSize_ = 0;
     UINT width_ = 0;
