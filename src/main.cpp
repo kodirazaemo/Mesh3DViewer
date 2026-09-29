@@ -3,8 +3,11 @@
 #include "mesh_loader.hpp"
 #include "renderer.hpp"
 
+#include <commdlg.h>
 #include <shellapi.h>
 #include <windowsx.h>
+
+#pragma comment(lib, "comdlg32.lib")
 
 #include <exception>
 #include <filesystem>
@@ -23,9 +26,19 @@ struct App
     bool dragging = false;
     int lastX = 0;
     int lastY = 0;
-    bool meshPending = false;
+    enum class PendingCommand
+    {
+        None,
+        Load,
+        Close,
+    };
+
+    PendingCommand pendingCommand = PendingCommand::None;
     std::filesystem::path pendingMesh;
 };
+
+constexpr UINT kCommandOpen = 1;
+constexpr UINT kCommandClose = 2;
 
 std::wstring WidenUtf8(std::string_view text)
 {
@@ -83,14 +96,67 @@ void LoadInto(App &app, const std::filesystem::path &path)
     SetWindowTextW(app.hwnd, title.c_str());
 }
 
+void CloseMesh(App &app)
+{
+    if (!app.renderer->HasMesh())
+    {
+        return;
+    }
+    app.renderer->UnloadMesh();
+    app.fit = {};
+    SetWindowTextW(app.hwnd, L"Mesh Viewer");
+}
+
+bool PickMeshFile(HWND owner, std::filesystem::path &path)
+{
+    wchar_t buffer[32768] = {};
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = owner;
+    dialog.lpstrFilter = L"Mesh files (*.obj;*.fbx;*.gltf;*.glb)\0*.obj;*.fbx;*.gltf;*.glb\0";
+    dialog.lpstrFile = buffer;
+    dialog.nMaxFile = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
+    dialog.lpstrTitle = L"Open Mesh";
+    if (!GetOpenFileNameW(&dialog))
+    {
+        return false;
+    }
+    path = buffer;
+    return true;
+}
+
+HMENU CreateMainMenu()
+{
+    HMENU file = CreatePopupMenu();
+    HMENU bar = CreateMenu();
+    if (!file || !bar)
+    {
+        if (file)
+        {
+            DestroyMenu(file);
+        }
+        if (bar)
+        {
+            DestroyMenu(bar);
+        }
+        return nullptr;
+    }
+    AppendMenuW(file, MF_STRING, kCommandOpen, L"Open\u2026");
+    AppendMenuW(file, MF_STRING, kCommandClose, L"Close");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"File");
+    return bar;
+}
+
 void ShowUsage()
 {
     MessageBoxW(nullptr,
                 L"meshviewer.exe [mesh-path]\n\n"
                 L"Opens an obj, fbx, gltf, or glb file.\n"
                 L"With no path, assets\\sample.obj next to the executable is loaded.\n"
-                L"Drag a mesh file onto the window to replace it.\n\n"
-                L"Left drag orbits. Mouse wheel zooms. Esc closes.",
+                L"Drag a mesh file onto the window to replace it.\n"
+                L"File, Open replaces the mesh. File, Close unloads it.\n\n"
+                L"Left drag orbits. Mouse wheel zooms. Esc closes the window.",
                 L"Mesh Viewer", MB_OK | MB_ICONINFORMATION);
 }
 
@@ -145,9 +211,31 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             if (DragQueryFileW(drop, 0, path, 32768) > 0)
             {
                 app->pendingMesh = path;
-                app->meshPending = true;
+                app->pendingCommand = App::PendingCommand::Load;
             }
             DragFinish(drop);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (app)
+        {
+            switch (LOWORD(wParam))
+            {
+            case kCommandOpen: {
+                std::filesystem::path path;
+                if (PickMeshFile(hwnd, path))
+                {
+                    app->pendingMesh = std::move(path);
+                    app->pendingCommand = App::PendingCommand::Load;
+                }
+                return 0;
+            }
+            case kCommandClose:
+                app->pendingCommand = App::PendingCommand::Close;
+                return 0;
+            default:
+                break;
+            }
         }
         return 0;
     case WM_KEYDOWN:
@@ -223,14 +311,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand)
         return 1;
     }
 
+    HMENU menu = CreateMainMenu();
+    if (!menu)
+    {
+        ShowError(nullptr, L"CreateMenu failed");
+        return 1;
+    }
+
     RECT rect{0, 0, 1280, 720};
     const UINT dpi = GetDpiForSystem();
-    AdjustWindowRectExForDpi(&rect, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+    AdjustWindowRectExForDpi(&rect, WS_OVERLAPPEDWINDOW, TRUE, 0, dpi);
     HWND hwnd =
         CreateWindowExW(0, windowClass.lpszClassName, L"Mesh Viewer", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                        rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr, instance, nullptr);
+                        rect.right - rect.left, rect.bottom - rect.top, nullptr, menu, instance, nullptr);
     if (!hwnd)
     {
+        DestroyMenu(menu);
         ShowError(nullptr, L"CreateWindowExW failed");
         return 1;
     }
@@ -280,12 +376,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand)
             WaitMessage();
             continue;
         }
-        if (app.meshPending)
+        if (app.pendingCommand == App::PendingCommand::Load)
         {
-            app.meshPending = false;
+            app.pendingCommand = App::PendingCommand::None;
             try
             {
                 LoadInto(app, app.pendingMesh);
+            }
+            catch (const std::exception &ex)
+            {
+                ShowError(hwnd, WidenUtf8(ex.what()));
+            }
+        }
+        else if (app.pendingCommand == App::PendingCommand::Close)
+        {
+            app.pendingCommand = App::PendingCommand::None;
+            try
+            {
+                CloseMesh(app);
             }
             catch (const std::exception &ex)
             {

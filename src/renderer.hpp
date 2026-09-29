@@ -26,6 +26,8 @@ class Renderer
     void Initialize(HWND hwnd, std::uint32_t width, std::uint32_t height, const std::filesystem::path &shaderPath);
     void Resize(std::uint32_t width, std::uint32_t height);
     void UploadMesh(const CpuMesh &mesh);
+    void UnloadMesh();
+    [[nodiscard]] bool HasMesh() const;
     void Render(const DirectX::XMMATRIX &world, const DirectX::XMMATRIX &view, const DirectX::XMMATRIX &projection);
     void WaitForGpu();
 

@@ -579,6 +579,27 @@ void Renderer::UploadMesh(const CpuMesh &mesh)
     indexCount_ = static_cast<UINT>(mesh.indices.size());
 }
 
+void Renderer::UnloadMesh()
+{
+    if (!HasMesh())
+    {
+        return;
+    }
+    WaitForGpu();
+    vertexBuffer_.Reset();
+    indexBuffer_.Reset();
+    texture_.Reset();
+    textureUpload_.Reset();
+    vertexView_ = {};
+    indexView_ = {};
+    indexCount_ = 0;
+}
+
+bool Renderer::HasMesh() const
+{
+    return indexCount_ > 0;
+}
+
 void Renderer::UploadTexture(const CpuMesh &mesh)
 {
     if (!srvHeap_)
@@ -680,14 +701,14 @@ void Renderer::Render(const DirectX::XMMATRIX &world, const DirectX::XMMATRIX &v
     commandList_->RSSetScissorRects(1, &scissor_);
     commandList_->SetGraphicsRootSignature(rootSignature_.Get());
     commandList_->SetPipelineState(pipeline_.Get());
-    ID3D12DescriptorHeap *heaps[] = {srvHeap_.Get()};
-    commandList_->SetDescriptorHeaps(1, heaps);
-    commandList_->SetGraphicsRootDescriptorTable(1, srvHeap_->GetGPUDescriptorHandleForHeapStart());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
 
     if (indexCount_ > 0)
     {
+        ID3D12DescriptorHeap *heaps[] = {srvHeap_.Get()};
+        commandList_->SetDescriptorHeaps(1, heaps);
+        commandList_->SetGraphicsRootDescriptorTable(1, srvHeap_->GetGPUDescriptorHandleForHeapStart());
         commandList_->IASetVertexBuffers(0, 1, &vertexView_);
         commandList_->IASetIndexBuffer(&indexView_);
         commandList_->DrawIndexedInstanced(indexCount_, 1, 0, 0, 0);
