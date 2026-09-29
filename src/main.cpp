@@ -39,6 +39,7 @@ struct App
 
 constexpr UINT kCommandOpen = 1;
 constexpr UINT kCommandClose = 2;
+constexpr UINT kCommandHelp = 3;
 
 std::wstring WidenUtf8(std::string_view text)
 {
@@ -145,7 +146,16 @@ HMENU CreateMainMenu()
     AppendMenuW(file, MF_STRING, kCommandOpen, L"Open\u2026");
     AppendMenuW(file, MF_STRING, kCommandClose, L"Close");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"File");
+    AppendMenuW(bar, MF_STRING, kCommandHelp, L"Help");
     return bar;
+}
+
+void ShowHelp(HWND owner)
+{
+    MessageBoxW(owner,
+                L"Drag and drop a mesh file onto the window to open it.\n\n"
+                L"You can also use the File menu to open a mesh or close the one that is loaded.",
+                L"Mesh Viewer", MB_OK | MB_ICONINFORMATION);
 }
 
 void ShowUsage()
@@ -232,6 +242,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             }
             case kCommandClose:
                 app->pendingCommand = App::PendingCommand::Close;
+                return 0;
+            case kCommandHelp:
+                ShowHelp(hwnd);
                 return 0;
             default:
                 break;
