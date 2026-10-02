@@ -12,14 +12,32 @@ struct CpuVertex
 {
     float position[3];
     float normal[3];
+    // xyz is the tangent. w is the bitangent handedness, +1 or -1. A zero xyz means the tangent is not usable.
+    float tangent[4];
     float uv[2];
     float color[4];
 };
 
-static_assert(sizeof(CpuVertex) == 48, "GPU input layout packs position, normal, uv, and color tightly");
+static_assert(sizeof(CpuVertex) == 64, "GPU input layout packs position, normal, tangent, uv, and color tightly");
 static_assert(offsetof(CpuVertex, normal) == 12, "normal follows position");
-static_assert(offsetof(CpuVertex, uv) == 24, "uv follows normal");
-static_assert(offsetof(CpuVertex, color) == 32, "color follows uv");
+static_assert(offsetof(CpuVertex, tangent) == 24, "tangent follows normal");
+static_assert(offsetof(CpuVertex, uv) == 40, "uv follows tangent");
+static_assert(offsetof(CpuVertex, color) == 48, "color follows uv");
+
+// One material image. Uncompressed RGBA, a compressed blob, or a file path. At most one is set.
+struct CpuImage
+{
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::vector<std::uint8_t> rgba;
+    std::vector<std::uint8_t> encoded;
+    std::filesystem::path file;
+};
+
+[[nodiscard]] inline bool HasImage(const CpuImage &image)
+{
+    return !image.rgba.empty() || !image.encoded.empty() || !image.file.empty();
+}
 
 struct CpuMesh
 {
@@ -27,14 +45,11 @@ struct CpuMesh
     std::vector<std::uint32_t> indices;
     float boundsMin[3]{};
     float boundsMax[3]{};
-    // Uncompressed embedded texels, tightly packed RGBA8. Empty when the texture is a file or a compressed blob.
-    std::uint32_t textureWidth = 0;
-    std::uint32_t textureHeight = 0;
-    std::vector<std::uint8_t> textureRgba;
-    // Compressed embedded image (PNG, JPEG, and the other containers Assimp stores). Decoded with WIC on Windows.
-    std::vector<std::uint8_t> textureEncoded;
-    // External image next to the mesh. Empty when the material has no file texture.
-    std::filesystem::path textureFile;
+    // First diffuse or base-color texture. Empty when the material has none.
+    CpuImage baseColor;
+    // First tangent-space normal texture (aiTextureType_NORMALS, including the glTF normalTexture slot).
+    // A height, bump, or displacement map is not stored here.
+    CpuImage normalMap;
 };
 
 // Places the mesh at the origin and scales its longest axis to 2 units.

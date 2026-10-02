@@ -139,8 +139,20 @@ f 4 7 3
             }
         }
         expect(triangleDefaults, "triangle without uv or color stores (0, 0) and white");
-        expect(triangle.textureFile.empty() && triangle.textureEncoded.empty() && triangle.textureRgba.empty(),
+        expect(!meshviewer::HasImage(triangle.baseColor) && !meshviewer::HasImage(triangle.normalMap),
                "triangle without a material texture has no image");
+        bool triangleTangentsMissing = true;
+        for (const meshviewer::CpuVertex &vertex : triangle.vertices)
+        {
+            const float tangentLength = vertex.tangent[0] * vertex.tangent[0] + vertex.tangent[1] * vertex.tangent[1] +
+                                        vertex.tangent[2] * vertex.tangent[2];
+            if (tangentLength > 1.0e-8f)
+            {
+                triangleTangentsMissing = false;
+                break;
+            }
+        }
+        expect(triangleTangentsMissing, "triangle without uvs stores no usable tangent");
 
         const auto textureDir = std::filesystem::temp_directory_path() / "meshviewer-texture-test";
         std::filesystem::remove_all(textureDir);
@@ -160,8 +172,95 @@ f 4 7 3
         }
         const meshviewer::CpuMesh textured = meshviewer::LoadMesh(textureDir / "textured.obj");
         expectValid(textured, "textured obj has vertices");
-        expect(textured.textureFile.filename() == "tiny.png", "obj map_Kd resolves next to the mesh");
-        expect(std::filesystem::is_regular_file(textured.textureFile), "resolved texture file exists");
+        expect(textured.baseColor.file.filename() == "tiny.png", "obj map_Kd resolves next to the mesh");
+        expect(std::filesystem::is_regular_file(textured.baseColor.file), "resolved texture file exists");
+        expect(!meshviewer::HasImage(textured.normalMap), "obj map_Kd is not treated as a normal map");
+
+        {
+            std::ofstream bumpImage(textureDir / "bump.png", std::ios::binary);
+            bumpImage.write(reinterpret_cast<const char *>(png), sizeof(png));
+            std::ofstream heightImage(textureDir / "height.png", std::ios::binary);
+            heightImage.write(reinterpret_cast<const char *>(png), sizeof(png));
+            std::ofstream normalImage(textureDir / "normal.png", std::ios::binary);
+            normalImage.write(reinterpret_cast<const char *>(png), sizeof(png));
+            std::ofstream bumpMaterial(textureDir / "bump.mtl");
+            bumpMaterial << "newmtl bumponly\nmap_bump bump.png\nmap_disp height.png\n";
+            std::ofstream normalMaterial(textureDir / "normal.mtl");
+            normalMaterial << "newmtl normal\nmap_bump bump.png\nmap_Kn normal.png\nmap_Kd tiny.png\n";
+            std::ofstream bumpObject(textureDir / "bump.obj");
+            bumpObject << "mtllib bump.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n"
+                       << "usemtl bumponly\nf 1/1 2/2 3/3\n";
+            std::ofstream normalObject(textureDir / "normal.obj");
+            normalObject << "mtllib normal.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n"
+                         << "usemtl normal\nf 1/1 2/2 3/3\n";
+        }
+        const meshviewer::CpuMesh bumpOnly = meshviewer::LoadMesh(textureDir / "bump.obj");
+        expectValid(bumpOnly, "bump obj has vertices");
+        expect(!meshviewer::HasImage(bumpOnly.normalMap), "bump and displacement maps are not normal maps");
+        const meshviewer::CpuMesh normalObj = meshviewer::LoadMesh(textureDir / "normal.obj");
+        expectValid(normalObj, "normal obj has vertices");
+        expect(normalObj.normalMap.file.filename() == "normal.png", "obj map_Kn resolves as the normal map");
+        expect(normalObj.baseColor.file.filename() == "tiny.png", "obj map_Kd is still the base color");
+        bool tangentBasis = normalObj.vertices.size() == 3;
+        for (const meshviewer::CpuVertex &vertex : normalObj.vertices)
+        {
+            tangentBasis = tangentBasis && nearly(vertex.normal[0], 0.0f, 1.0e-3f) &&
+                           nearly(vertex.normal[1], 0.0f, 1.0e-3f) && nearly(vertex.normal[2], 1.0f, 1.0e-3f) &&
+                           nearly(vertex.tangent[0], 1.0f, 1.0e-3f) && nearly(vertex.tangent[1], 0.0f, 1.0e-3f) &&
+                           nearly(vertex.tangent[2], 0.0f, 1.0e-3f) && nearly(vertex.tangent[3], 1.0f, 1.0e-3f);
+        }
+        expect(tangentBasis, "uv triangle stores a +X tangent and +1 bitangent handedness");
+        {
+            std::ofstream mirrored(textureDir / "mirrored.obj");
+            mirrored << "v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 1\nvt 1 1\nvt 0 0\nf 1/1 2/2 3/3\n";
+        }
+        const meshviewer::CpuMesh mirroredUv = meshviewer::LoadMesh(textureDir / "mirrored.obj");
+        expectValid(mirroredUv, "mirrored uv triangle has vertices");
+        bool mirroredHandedness = mirroredUv.vertices.size() == 3;
+        for (const meshviewer::CpuVertex &vertex : mirroredUv.vertices)
+        {
+            mirroredHandedness = mirroredHandedness && nearly(vertex.tangent[0], 1.0f, 1.0e-3f) &&
+                                 nearly(vertex.tangent[1], 0.0f, 1.0e-3f) && nearly(vertex.tangent[2], 0.0f, 1.0e-3f) &&
+                                 nearly(vertex.tangent[3], -1.0f, 1.0e-3f);
+        }
+        expect(mirroredHandedness, "mirrored uv triangle stores bitangent handedness -1");
+
+        {
+            const float positions[9] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+            const float uvs[6] = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+            const std::uint16_t indices[3] = {0, 1, 2};
+            std::ofstream binary(textureDir / "triangle.bin", std::ios::binary);
+            binary.write(reinterpret_cast<const char *>(positions), sizeof(positions));
+            binary.write(reinterpret_cast<const char *>(uvs), sizeof(uvs));
+            binary.write(reinterpret_cast<const char *>(indices), sizeof(indices));
+            std::ofstream gltf(textureDir / "normal.gltf");
+            gltf << R"gltf({
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"mesh": 0}],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]}],
+  "materials": [{"normalTexture": {"index": 0}, "pbrMetallicRoughness": {"baseColorTexture": {"index": 1}}}],
+  "textures": [{"source": 0}, {"source": 1}],
+  "images": [{"uri": "normal.png"}, {"uri": "tiny.png"}],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+    {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2"},
+    {"bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 24, "target": 34962},
+    {"buffer": 0, "byteOffset": 60, "byteLength": 6, "target": 34963}
+  ],
+  "buffers": [{"byteLength": 66, "uri": "triangle.bin"}]
+})gltf";
+        }
+        const meshviewer::CpuMesh normalGltf = meshviewer::LoadMesh(textureDir / "normal.gltf");
+        expectValid(normalGltf, "gltf with normalTexture has vertices");
+        expect(normalGltf.normalMap.file.filename() == "normal.png",
+               "gltf normalTexture slot resolves as the normal map");
+        expect(normalGltf.baseColor.file.filename() == "tiny.png", "gltf baseColorTexture stays the base color");
         std::filesystem::remove_all(textureDir);
 
         constexpr std::string_view kColored = R"ply(ply

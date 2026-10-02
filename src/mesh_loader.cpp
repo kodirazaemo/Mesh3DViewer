@@ -8,6 +8,7 @@
 #endif
 
 #include <assimp/Importer.hpp>
+#include <assimp/config.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
@@ -24,7 +25,8 @@ namespace
 {
 
 constexpr unsigned int kPostProcess = aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_GenNormals |
-                                      aiProcess_ImproveCacheLocality | aiProcess_SortByPType;
+                                      aiProcess_CalcTangentSpace | aiProcess_ImproveCacheLocality |
+                                      aiProcess_SortByPType;
 
 std::string Utf8Path(const std::filesystem::path &path)
 {
@@ -49,7 +51,7 @@ bool FindBaseColorTexture(const aiMaterial *material, aiString &path)
            MaterialTexturePath(material, aiTextureType_DIFFUSE, path);
 }
 
-void StoreEmbeddedTexture(const aiTexture *embedded, CpuMesh &mesh)
+void StoreEmbeddedTexture(const aiTexture *embedded, CpuImage &image)
 {
     if (embedded->pcData == nullptr || embedded->mWidth == 0)
     {
@@ -58,19 +60,19 @@ void StoreEmbeddedTexture(const aiTexture *embedded, CpuMesh &mesh)
     if (embedded->mHeight == 0)
     {
         const auto *bytes = reinterpret_cast<const std::uint8_t *>(embedded->pcData);
-        mesh.textureEncoded.assign(bytes, bytes + embedded->mWidth);
+        image.encoded.assign(bytes, bytes + embedded->mWidth);
         return;
     }
 
     const std::uint32_t width = embedded->mWidth;
     const std::uint32_t height = embedded->mHeight;
-    mesh.textureWidth = width;
-    mesh.textureHeight = height;
-    mesh.textureRgba.resize(static_cast<std::size_t>(width) * height * 4);
+    image.width = width;
+    image.height = height;
+    image.rgba.resize(static_cast<std::size_t>(width) * height * 4);
     for (std::uint32_t index = 0; index < width * height; ++index)
     {
         const aiTexel &texel = embedded->pcData[index];
-        std::uint8_t *pixel = mesh.textureRgba.data() + static_cast<std::size_t>(index) * 4;
+        std::uint8_t *pixel = image.rgba.data() + static_cast<std::size_t>(index) * 4;
         pixel[0] = texel.r;
         pixel[1] = texel.g;
         pixel[2] = texel.b;
@@ -105,12 +107,20 @@ std::filesystem::path FindTextureFile(const std::filesystem::path &meshDirectory
     throw std::runtime_error(std::string("texture file not found: ") + texturePath.C_Str());
 }
 
-void AttachBaseColorTexture(const aiScene *scene, const std::filesystem::path &meshDirectory, CpuMesh &mesh)
+// Tangent-space normal maps only. Assimp writes the glTF normalTexture slot as aiTextureType_NORMALS.
+// Height, bump, and displacement stay on their own slots and are not normal maps.
+bool FindNormalTexture(const aiMaterial *material, aiString &path)
+{
+    return MaterialTexturePath(material, aiTextureType_NORMALS, path);
+}
+
+void AttachTexture(const aiScene *scene, const std::filesystem::path &meshDirectory,
+                   bool (*find)(const aiMaterial *, aiString &), CpuImage &image)
 {
     for (unsigned int index = 0; index < scene->mNumMaterials; ++index)
     {
         aiString texturePath;
-        if (!FindBaseColorTexture(scene->mMaterials[index], texturePath))
+        if (!find(scene->mMaterials[index], texturePath))
         {
             continue;
         }
@@ -118,10 +128,10 @@ void AttachBaseColorTexture(const aiScene *scene, const std::filesystem::path &m
         const char *name = texturePath.C_Str();
         if (const aiTexture *embedded = scene->GetEmbeddedTexture(name))
         {
-            StoreEmbeddedTexture(embedded, mesh);
+            StoreEmbeddedTexture(embedded, image);
             return;
         }
-        mesh.textureFile = FindTextureFile(meshDirectory, texturePath);
+        image.file = FindTextureFile(meshDirectory, texturePath);
         return;
     }
 }
@@ -147,6 +157,74 @@ aiMatrix3x3 NormalMatrix(const aiMatrix4x4 &transform)
     return linear;
 }
 
+float LengthSquared(const aiVector3D &vector)
+{
+    return vector.x * vector.x + vector.y * vector.y + vector.z * vector.z;
+}
+
+bool Finite(const aiVector3D &vector)
+{
+    return std::isfinite(vector.x) && std::isfinite(vector.y) && std::isfinite(vector.z);
+}
+
+aiVector3D NormalizeOrZero(aiVector3D vector)
+{
+    const float lengthSquared = LengthSquared(vector);
+    if (lengthSquared <= 1.0e-12f || !std::isfinite(lengthSquared))
+    {
+        return aiVector3D(0.0f, 0.0f, 0.0f);
+    }
+    const float inverse = 1.0f / std::sqrt(lengthSquared);
+    vector.x *= inverse;
+    vector.y *= inverse;
+    vector.z *= inverse;
+    return vector;
+}
+
+float TripleProduct(const aiVector3D &normal, const aiVector3D &tangent, const aiVector3D &bitangent)
+{
+    const float crossX = normal.y * tangent.z - normal.z * tangent.y;
+    const float crossY = normal.z * tangent.x - normal.x * tangent.z;
+    const float crossZ = normal.x * tangent.y - normal.y * tangent.x;
+    return crossX * bitangent.x + crossY * bitangent.y + crossZ * bitangent.z;
+}
+
+// Bakes the node matrix into the tangent and stores bitangent handedness in tangent[3].
+// A missing or degenerate basis stores a zero tangent so the shader keeps the vertex normal.
+void StoreTangent(const aiMesh *source, unsigned int index, const aiMatrix3x3 &linear, const aiVector3D &normal,
+                  CpuVertex &vertex)
+{
+    vertex.tangent[0] = 0.0f;
+    vertex.tangent[1] = 0.0f;
+    vertex.tangent[2] = 0.0f;
+    vertex.tangent[3] = 1.0f;
+    if (!source->mTangents || !source->mBitangents)
+    {
+        return;
+    }
+
+    const aiVector3D tangent = NormalizeOrZero(linear * source->mTangents[index]);
+    const aiVector3D bitangent = NormalizeOrZero(linear * source->mBitangents[index]);
+    if (!Finite(tangent) || !Finite(bitangent) || LengthSquared(tangent) <= 1.0e-12f ||
+        LengthSquared(bitangent) <= 1.0e-12f)
+    {
+        return;
+    }
+
+    const float assimpHandedness = TripleProduct(normal, tangent, bitangent);
+    if (!std::isfinite(assimpHandedness) || std::fabs(assimpHandedness) <= 1.0e-8f)
+    {
+        return;
+    }
+
+    // CalcTangentSpace writes a bitangent opposite the positive V axis. The stored sign is reversed
+    // so cross(normal, tangent) * w follows texture V, which is the frame the normal map was authored in.
+    vertex.tangent[0] = tangent.x;
+    vertex.tangent[1] = tangent.y;
+    vertex.tangent[2] = tangent.z;
+    vertex.tangent[3] = assimpHandedness < 0.0f ? 1.0f : -1.0f;
+}
+
 void AppendMesh(const aiMesh *source, const aiMatrix4x4 &transform, CpuMesh &mesh)
 {
     if (source->mPrimitiveTypes != 0 && (source->mPrimitiveTypes & aiPrimitiveType_TRIANGLE) == 0)
@@ -169,6 +247,7 @@ void AppendMesh(const aiMesh *source, const aiMatrix4x4 &transform, CpuMesh &mes
     }
 
     const aiMatrix3x3 normals = NormalMatrix(transform);
+    const aiMatrix3x3 linear(transform);
     mesh.vertices.reserve(mesh.vertices.size() + source->mNumVertices);
     for (unsigned int index = 0; index < source->mNumVertices; ++index)
     {
@@ -198,6 +277,7 @@ void AppendMesh(const aiMesh *source, const aiMatrix4x4 &transform, CpuMesh &mes
         vertex.normal[0] = normal.x;
         vertex.normal[1] = normal.y;
         vertex.normal[2] = normal.z;
+        StoreTangent(source, index, linear, normal, vertex);
         if (source->HasTextureCoords(0))
         {
             const aiVector3D &uv = source->mTextureCoords[0][index];
@@ -283,8 +363,15 @@ CpuMesh FromScene(const aiScene *scene, Assimp::Importer &importer, const std::f
     {
         throw std::runtime_error("mesh file did not contain any triangles");
     }
-    AttachBaseColorTexture(scene, meshDirectory, mesh);
+    AttachTexture(scene, meshDirectory, FindBaseColorTexture, mesh.baseColor);
+    AttachTexture(scene, meshDirectory, FindNormalTexture, mesh.normalMap);
     return mesh;
+}
+
+void ConfigureImporter(Assimp::Importer &importer)
+{
+    // aiProcess_CalcTangentSpace reads this channel. The pixel shader samples the same UV set.
+    importer.SetPropertyInteger(AI_CONFIG_PP_CT_TEXTURE_CHANNEL_INDEX, 0);
 }
 
 } // namespace
@@ -302,6 +389,7 @@ CpuMesh LoadMesh(const std::filesystem::path &path)
     }
 
     Assimp::Importer importer;
+    ConfigureImporter(importer);
     const std::string utf8 = Utf8Path(path);
     const aiScene *scene = importer.ReadFile(utf8, kPostProcess);
     return FromScene(scene, importer, path.parent_path());
@@ -314,6 +402,7 @@ CpuMesh LoadMeshFromMemory(const void *data, std::size_t size, const char *hint)
         throw std::runtime_error("mesh data is empty");
     }
     Assimp::Importer importer;
+    ConfigureImporter(importer);
     const aiScene *scene = importer.ReadFileFromMemory(data, size, kPostProcess, hint);
     return FromScene(scene, importer, {});
 }

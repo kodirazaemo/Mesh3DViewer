@@ -31,12 +31,14 @@ struct FrameConstants
     DirectX::XMFLOAT4X4 mvp;
     DirectX::XMFLOAT4X4 world;
     DirectX::XMFLOAT4 lightDirection;
+    float useNormalMap;
 };
 
 static_assert(offsetof(FrameConstants, mvp) == 0);
 static_assert(offsetof(FrameConstants, world) == 64);
 static_assert(offsetof(FrameConstants, lightDirection) == 128);
-static_assert(sizeof(FrameConstants) == 144);
+static_assert(offsetof(FrameConstants, useNormalMap) == 144);
+static_assert(sizeof(FrameConstants) == 148);
 
 ComPtr<ID3DBlob> CompileShader(const std::filesystem::path &path, const char *entry, const char *target)
 {
@@ -137,31 +139,98 @@ DecodedImage DecodeWithWic(const std::filesystem::path &file, const std::vector<
     return image;
 }
 
-DecodedImage DecodeMeshTexture(const CpuMesh &mesh)
+DecodedImage DecodeCpuImage(const CpuImage &source, std::uint8_t fallbackR, std::uint8_t fallbackG,
+                            std::uint8_t fallbackB, std::uint8_t fallbackA)
 {
-    if (!mesh.textureRgba.empty())
+    if (!source.rgba.empty())
     {
-        const std::size_t expected = static_cast<std::size_t>(mesh.textureWidth) * mesh.textureHeight * 4;
-        if (mesh.textureWidth == 0 || mesh.textureHeight == 0 || mesh.textureRgba.size() != expected)
+        const std::size_t expected = static_cast<std::size_t>(source.width) * source.height * 4;
+        if (source.width == 0 || source.height == 0 || source.rgba.size() != expected)
         {
             throw std::runtime_error("embedded texture pixels do not match its dimensions");
         }
         DecodedImage image;
-        image.width = mesh.textureWidth;
-        image.height = mesh.textureHeight;
-        image.rgba = mesh.textureRgba;
+        image.width = source.width;
+        image.height = source.height;
+        image.rgba = source.rgba;
         return image;
     }
-    if (!mesh.textureFile.empty() || !mesh.textureEncoded.empty())
+    if (!source.file.empty() || !source.encoded.empty())
     {
-        return DecodeWithWic(mesh.textureFile, mesh.textureEncoded);
+        return DecodeWithWic(source.file, source.encoded);
     }
 
-    DecodedImage white;
-    white.width = 1;
-    white.height = 1;
-    white.rgba = {255, 255, 255, 255};
-    return white;
+    DecodedImage fallback;
+    fallback.width = 1;
+    fallback.height = 1;
+    fallback.rgba = {fallbackR, fallbackG, fallbackB, fallbackA};
+    return fallback;
+}
+
+struct UploadedImage
+{
+    ComPtr<ID3D12Resource> texture;
+    ComPtr<ID3D12Resource> upload;
+};
+
+ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device *device, D3D12_HEAP_TYPE heapType, UINT64 size,
+                                    D3D12_RESOURCE_STATES state);
+
+UploadedImage UploadImage(ID3D12Device *device, ID3D12GraphicsCommandList *commandList, const DecodedImage &image,
+                          D3D12_CPU_DESCRIPTOR_HANDLE srv, const wchar_t *name)
+{
+    const UINT rowPitch =
+        (image.width * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    const UINT64 uploadBytes = static_cast<UINT64>(rowPitch) * image.height;
+
+    const CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    const auto textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, image.width, image.height, 1, 1);
+    UploadedImage uploaded;
+    ThrowIfFailed(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDesc,
+                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                  IID_PPV_ARGS(&uploaded.texture)),
+                  "CreateCommittedResource(texture)");
+    uploaded.upload = CreateBuffer(device, D3D12_HEAP_TYPE_UPLOAD, uploadBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+    void *mapped = nullptr;
+    ThrowIfFailed(uploaded.upload->Map(0, nullptr, &mapped), "Map(texture)");
+    auto *destination = static_cast<std::uint8_t *>(mapped);
+    for (UINT row = 0; row < image.height; ++row)
+    {
+        std::memcpy(destination + static_cast<std::size_t>(row) * rowPitch,
+                    image.rgba.data() + static_cast<std::size_t>(row) * image.width * 4,
+                    static_cast<std::size_t>(image.width) * 4);
+    }
+    uploaded.upload->Unmap(0, nullptr);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    footprint.Footprint.Width = image.width;
+    footprint.Footprint.Height = image.height;
+    footprint.Footprint.Depth = 1;
+    footprint.Footprint.RowPitch = rowPitch;
+
+    D3D12_TEXTURE_COPY_LOCATION destinationLocation{};
+    destinationLocation.pResource = uploaded.texture.Get();
+    destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION sourceLocation{};
+    sourceLocation.pResource = uploaded.upload.Get();
+    sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    sourceLocation.PlacedFootprint = footprint;
+    commandList->CopyTextureRegion(&destinationLocation, 0, 0, 0, &sourceLocation, nullptr);
+
+    const auto toShader = CD3DX12_RESOURCE_BARRIER::Transition(uploaded.texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    commandList->ResourceBarrier(1, &toShader);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(uploaded.texture.Get(), &view, srv);
+    uploaded.texture->SetName(name);
+    return uploaded;
 }
 
 ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device *device, D3D12_HEAP_TYPE heapType, UINT64 size,
@@ -349,10 +418,11 @@ void Renderer::CreateDescriptorHeaps()
     ThrowIfFailed(device_->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&dsvHeap_)), "CreateDescriptorHeap(DSV)");
 
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc{};
-    srvDesc.NumDescriptors = 1;
+    srvDesc.NumDescriptors = 2;
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(device_->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&srvHeap_)), "CreateDescriptorHeap(SRV)");
+    srvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
 
 void Renderer::CreateSizeDependentResources()
@@ -404,7 +474,7 @@ void Renderer::UpdateViewport()
 void Renderer::CreateRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE range;
-    range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
 
     CD3DX12_ROOT_PARAMETER parameters[2];
     parameters[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
@@ -456,6 +526,8 @@ void Renderer::CreatePipeline(const std::filesystem::path &shaderPath)
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, normal)),
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, tangent)),
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, uv)),
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(CpuVertex, color)),
@@ -480,7 +552,7 @@ void Renderer::CreatePipeline(const std::filesystem::path &shaderPath)
     pso.SampleMask = UINT_MAX;
     pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    pso.InputLayout = {layout, 4};
+    pso.InputLayout = {layout, 5};
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1;
     pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -590,6 +662,9 @@ void Renderer::UnloadMesh()
     indexBuffer_.Reset();
     texture_.Reset();
     textureUpload_.Reset();
+    normalTexture_.Reset();
+    normalTextureUpload_.Reset();
+    useNormalMap_ = 0.0f;
     vertexView_ = {};
     indexView_ = {};
     indexCount_ = 0;
@@ -607,61 +682,21 @@ void Renderer::UploadTexture(const CpuMesh &mesh)
         throw std::runtime_error("shader resource heap is not initialized");
     }
 
-    const DecodedImage image = DecodeMeshTexture(mesh);
-    const UINT rowPitch =
-        (image.width * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
-    const UINT64 uploadBytes = static_cast<UINT64>(rowPitch) * image.height;
+    const DecodedImage baseColor = DecodeCpuImage(mesh.baseColor, 255, 255, 255, 255);
+    // (128, 128, 255) is a flat tangent-space normal. It is bound even when the material has no normal map.
+    const DecodedImage normalMap = DecodeCpuImage(mesh.normalMap, 128, 128, 255, 255);
+    useNormalMap_ = HasImage(mesh.normalMap) ? 1.0f : 0.0f;
 
-    const CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
-    const auto textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, image.width, image.height, 1, 1);
-    ComPtr<ID3D12Resource> texture;
-    ThrowIfFailed(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDesc,
-                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture)),
-                  "CreateCommittedResource(texture)");
-    ComPtr<ID3D12Resource> upload =
-        CreateBuffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, uploadBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
-
-    void *mapped = nullptr;
-    ThrowIfFailed(upload->Map(0, nullptr, &mapped), "Map(texture)");
-    auto *destination = static_cast<std::uint8_t *>(mapped);
-    for (UINT row = 0; row < image.height; ++row)
-    {
-        std::memcpy(destination + static_cast<std::size_t>(row) * rowPitch,
-                    image.rgba.data() + static_cast<std::size_t>(row) * image.width * 4,
-                    static_cast<std::size_t>(image.width) * 4);
-    }
-    upload->Unmap(0, nullptr);
-
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-    footprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    footprint.Footprint.Width = image.width;
-    footprint.Footprint.Height = image.height;
-    footprint.Footprint.Depth = 1;
-    footprint.Footprint.RowPitch = rowPitch;
-
-    D3D12_TEXTURE_COPY_LOCATION destinationLocation{};
-    destinationLocation.pResource = texture.Get();
-    destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    D3D12_TEXTURE_COPY_LOCATION sourceLocation{};
-    sourceLocation.pResource = upload.Get();
-    sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    sourceLocation.PlacedFootprint = footprint;
-    commandList_->CopyTextureRegion(&destinationLocation, 0, 0, 0, &sourceLocation, nullptr);
-
-    const auto toShader = CD3DX12_RESOURCE_BARRIER::Transition(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    commandList_->ResourceBarrier(1, &toShader);
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MipLevels = 1;
-    device_->CreateShaderResourceView(texture.Get(), &srv, srvHeap_->GetCPUDescriptorHandleForHeapStart());
-
-    texture_ = std::move(texture);
-    texture_->SetName(L"BaseColorTexture");
-    textureUpload_ = std::move(upload);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE baseSrv(srvHeap_->GetCPUDescriptorHandleForHeapStart());
+    CD3DX12_CPU_DESCRIPTOR_HANDLE normalSrv(baseSrv, 1, srvDescriptorSize_);
+    UploadedImage baseUploaded =
+        UploadImage(device_.Get(), commandList_.Get(), baseColor, baseSrv, L"BaseColorTexture");
+    UploadedImage normalUploaded =
+        UploadImage(device_.Get(), commandList_.Get(), normalMap, normalSrv, L"NormalTexture");
+    texture_ = std::move(baseUploaded.texture);
+    textureUpload_ = std::move(baseUploaded.upload);
+    normalTexture_ = std::move(normalUploaded.texture);
+    normalTextureUpload_ = std::move(normalUploaded.upload);
 }
 
 void Renderer::Render(const DirectX::XMMATRIX &world, const DirectX::XMMATRIX &view,
@@ -682,6 +717,7 @@ void Renderer::Render(const DirectX::XMMATRIX &world, const DirectX::XMMATRIX &v
     DirectX::XMStoreFloat4x4(&constants.world, DirectX::XMMatrixTranspose(world));
     DirectX::XMStoreFloat4(&constants.lightDirection,
                            DirectX::XMVector3Normalize(DirectX::XMVectorSet(0.35f, 0.85f, 0.40f, 0.0f)));
+    constants.useNormalMap = useNormalMap_;
     std::memcpy(constantMapped_, &constants, sizeof(constants));
 
     const UINT frame = swapChain_->GetCurrentBackBufferIndex();

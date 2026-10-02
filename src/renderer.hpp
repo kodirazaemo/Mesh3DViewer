@@ -67,6 +67,8 @@ class Renderer
     Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> texture_;
     Microsoft::WRL::ComPtr<ID3D12Resource> textureUpload_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> normalTexture_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> normalTextureUpload_;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
 
     std::uint8_t *constantMapped_ = nullptr;
@@ -74,6 +76,8 @@ class Renderer
     bool comInitialized_ = false;
     UINT64 fenceValue_ = 0;
     UINT rtvDescriptorSize_ = 0;
+    UINT srvDescriptorSize_ = 0;
+    float useNormalMap_ = 0.0f;
     UINT width_ = 0;
     UINT height_ = 0;
     UINT indexCount_ = 0;
